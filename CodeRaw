@@ -1,0 +1,553 @@
+
+### set le working directory et importer la table ###
+
+setwd("~/Desktop/projet_final")
+library(tidyverse)
+library(lubridate)
+stock_price <- read.csv('stock_price.csv')
+
+### nettoyer la table ###
+
+sp_summarized <- stock_price %>%
+  group_by(Ticker) %>%
+  summarise(total_splits = sum(Stock.Splits, na.rm = TRUE)) %>%
+  filter(total_splits == 0)
+
+sp <- stock_price %>%
+  rename(date = Date,open = Open, high = High, low = Low, close = Close, volume = Volume, dividends = Dividends, name = Brand_Name,
+         ticker = Ticker,industry = Industry_Tag,country = Country) %>%
+  mutate(date = ymd(substr(date, 1, 10)),
+         month = month(ymd(substr(date, 1, 10)), label = TRUE, abbr = FALSE),
+         week = week(ymd(substr(date, 1, 10))),
+         day = wday(ymd(substr(date, 1, 10))), label = TRUE, abbr = FALSE) %>%
+  select(date,month,week,day,open,high,low,close,volume,dividends,name,ticker,industry,country) %>%
+  filter(ticker %in% sp_summarized$Ticker)
+  
+### stratégie de buy and hold (BASE DE COMPARAISON) ###
+
+buy_hold_rendement <- sp %>%
+  group_by(ticker) %>%
+  summarise(
+    date_debut = min(date, na.rm = TRUE),
+    date_fin = max(date, na.rm = TRUE),
+    open_debut = open[which.min(date)],
+    close_fin = close[which.max(date)],
+    rendement_hold = close_fin / open_debut - 1
+  )
+
+### Stratégie RSI ###
+
+library(TTR)
+
+sp <- sp %>%
+  group_by(ticker) %>%
+  arrange(date, .by_group = TRUE) %>% 
+  mutate(rsi = RSI(close, n = 14)) %>%
+  ungroup()
+
+# Fonction pour calculer les rendements pour un ticker donné
+calculer_rendements_rsi <- function(df) {
+  df <- df %>%
+    arrange(date)
+  
+  résultats <- list()
+  i <- 1
+  while (i < nrow(df)) {
+    # Chercher un point d'entrée (RSI < 30)
+    if (!is.na(df$rsi[i]) && df$rsi[i] < 30) {
+      achat_index <- i
+      achat_date <- df$date[i]
+      prix_achat <- df$close[i]
+      
+      # Chercher un point de sortie (RSI > 70)
+      j <- i + 1
+      while (j <= nrow(df) && (is.na(df$rsi[j]) || df$rsi[j] <= 70)) {
+        j <- j + 1
+      }
+      
+      # Si on trouve un point de sortie valide
+      if (j <= nrow(df)) {
+        vente_index <- j
+        vente_date <- df$date[j]
+        prix_vente <- df$close[j]
+        
+        # Somme des dividendes reçus entre achat et vente (exclusifs)
+        dividendes <- sum(df$dividends[(achat_index+1):(vente_index-1)], na.rm = TRUE)
+        
+        # Calcul du rendement
+        rendement <- (prix_vente + dividendes) / prix_achat - 1
+        
+        # Stocker le trade
+        résultats[[length(résultats) + 1]] <- tibble(
+          ticker = df$ticker[1],
+          date_achat = achat_date,
+          date_vente = vente_date,
+          prix_achat = prix_achat,
+          prix_vente = prix_vente,
+          dividendes = dividendes,
+          rendement = rendement
+        )
+        
+        # Continuer à chercher après le point de vente
+        i <- vente_index + 1
+      } else {
+        break
+      }
+    } else {
+      i <- i + 1
+    }
+  }
+  
+  # Retourner les résultats combinés
+  if (length(résultats) > 0) {
+    bind_rows(résultats)
+  } else {
+    tibble()
+  }
+}
+
+# Appliquer à chaque ticker
+rendements_par_ticker <- sp %>%
+  group_by(ticker) %>%
+  group_split() %>%
+  map_dfr(calculer_rendements_rsi)
+
+rendement_total <- rendements_par_ticker %>%
+  group_by(ticker) %>%
+  summarise(
+    rendement_total = prod(1 + rendement, na.rm = TRUE) - 1
+  )
+
+transactions_rsi <- rendements_par_ticker %>%
+  group_by(ticker) %>%
+  summarise(nombre_transactions_rsi = n())
+
+### stratégie MACD ###
+
+sp_macd <- sp %>%
+  group_by(ticker) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(
+    ema12 = EMA(close, n = 12),
+    ema26 = EMA(close, n = 26),
+    macd = ema12 - ema26,
+    signal = EMA(macd, n = 9)
+  ) %>%
+  ungroup()
+
+
+library(purrr)
+
+calculer_trades_macd <- function(df) {
+  df <- df %>%
+    mutate(
+      macd_lag = lag(macd),
+      signal_lag = lag(signal),
+      cross_up = macd_lag < signal_lag & macd > signal,  # Croisement vers le haut
+      cross_down = macd_lag > signal_lag & macd < signal  # Croisement vers le bas
+    ) %>%
+    filter(!is.na(cross_up), !is.na(cross_down))  # Filtrer les NA
+  
+  trades <- list()
+  i <- 1
+  
+  # Boucle pour trouver les points d'achat et de vente
+  while (i <= nrow(df)) {
+    if (df$cross_up[i]) {
+      achat_index <- i
+      prix_achat <- df$close[i]
+      date_achat <- df$date[i]
+      
+      # Chercher la prochaine vente
+      j <- i + 1
+      while (j <= nrow(df) && !df$cross_down[j]) {
+        j <- j + 1
+      }
+      
+      if (j <= nrow(df)) {
+        prix_vente <- df$close[j]
+        date_vente <- df$date[j]
+        rendement <- prix_vente / prix_achat - 1
+        
+        trades[[length(trades) + 1]] <- tibble(
+          ticker = df$ticker[1],
+          date_achat = date_achat,
+          date_vente = date_vente,
+          prix_achat = prix_achat,
+          prix_vente = prix_vente,
+          rendement = rendement
+        )
+        
+        i <- j + 1  # Avancer à l'après-vente
+      } else {
+        break  # Pas de vente, donc on arrête
+      }
+    } else {
+      i <- i + 1  # Passer à la ligne suivante
+    }
+  }
+  
+  # Retourner les trades calculés
+  if (length(trades) > 0) bind_rows(trades) else tibble()
+}
+
+# Appliquer la stratégie à tous les tickers
+rendements_macd <- sp_macd %>%
+  group_by(ticker) %>%
+  group_split() %>%
+  map_dfr(calculer_trades_macd)
+
+# Calculer le rendement total par ticker
+rendement_total_macd <- rendements_macd %>%
+  group_by(ticker) %>%
+  summarise(
+    rend_total_macd = prod(1 + rendement, na.rm = TRUE) - 1
+  )
+
+transactions_macd <- rendements_macd %>%
+  group_by(ticker) %>%
+  summarise(nombre_transactions_macd = n())
+
+### on balance volume ###
+
+sp_obv <- sp %>%
+  group_by(ticker) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(
+    close_lag = lag(close),
+    direction = case_when(
+      close > close_lag ~ 1,
+      close < close_lag ~ -1,
+      TRUE ~ 0
+    ),
+    volume_adj = direction * volume,
+    obv = cumsum(replace_na(volume_adj, 0))  # cumule les volumes ajustés
+  ) %>%
+  select(-close_lag, -direction, -volume_adj) %>%
+  ungroup()
+
+
+sp_signaux <- sp_obv %>%
+  group_by(ticker) %>%
+  arrange(date, .by_group = TRUE) %>%
+  mutate(
+    obv_lag9 = lag(obv, 9),
+    signal_achat = obv > 1.2 * obv_lag9,
+    signal_vente = obv < 0.8 * obv_lag9,
+    signal_achat = replace_na(signal_achat, FALSE),
+    signal_vente = replace_na(signal_vente, FALSE)
+  ) %>%
+  ungroup()
+
+# Simulation des trades
+simuler_trades_obv <- function(df) {
+  trades <- list()
+  i <- 1
+  
+  while (i <= nrow(df)) {
+    if (df$signal_achat[i]) {
+      date_achat <- df$date[i]
+      prix_achat <- df$close[i]
+      
+      j <- i + 1
+      while (j <= nrow(df) && !df$signal_vente[j]) {
+        j <- j + 1
+      }
+      
+      if (j <= nrow(df)) {
+        date_vente <- df$date[j]
+        prix_vente <- df$close[j]
+        rendement <- prix_vente / prix_achat - 1
+        
+        trades[[length(trades) + 1]] <- tibble(
+          ticker = df$ticker[1],
+          date_achat = date_achat,
+          date_vente = date_vente,
+          prix_achat = prix_achat,
+          prix_vente = prix_vente,
+          rendement = rendement
+        )
+        
+        i <- j + 1
+      } else {
+        break
+      }
+    } else {
+      i <- i + 1
+    }
+  }
+  
+  if (length(trades) > 0) bind_rows(trades) else tibble()
+}
+
+# Appliquer à tous les tickers
+rendements_obv <- sp_signaux %>%
+  group_by(ticker) %>%
+  group_split() %>%
+  map_dfr(simuler_trades_obv)
+
+# Résumer le rendement cumulé
+rendement_total_obv <- rendements_obv %>%
+  group_by(ticker) %>%
+  summarise(
+    rend_total_obv = prod(1 + rendement, na.rm = TRUE) - 1
+  )
+
+transactions_obv <- rendements_obv %>%
+  group_by(ticker) %>%
+  summarise(nombre_transactions_obv = n())
+
+### stratégie détention de novembre à avril ###
+
+mois_detenus <- c("November", "December", "January", "February", "March", "April")
+
+# Ajouter une colonne "year_month" pour identifier les saisons
+sp_filtered <- sp %>%
+  filter(month %in% mois_detenus) %>%
+  mutate(
+    year = year(date),
+    saison = case_when(
+      month %in% c("November", "December") ~ paste0(year, "-", year + 1),
+      TRUE ~ paste0(year - 1, "-", year)
+    )
+  )
+
+# Identifier la première et dernière date de détention par saison et ticker
+rendements <- sp_filtered %>%
+  group_by(ticker, saison) %>%
+  summarise(
+    date_achat = min(date, na.rm = TRUE),
+    prix_achat = close[which.min(date)],
+    date_vente = max(date, na.rm = TRUE),
+    prix_vente = close[which.max(date)],
+    .groups = "drop"
+  ) %>%
+  filter(!is.na(prix_achat), !is.na(prix_vente)) %>%   # Filtrer les cas avec données manquantes
+  mutate(
+    rendement = prix_vente / prix_achat - 1
+  )
+
+# Calculer le rendement cumulé par ticker (buy during Nov-April only)
+rendement_total_saison <- rendements %>%
+  group_by(ticker) %>%
+  summarise(
+    rendement_total_hiver = prod(1 + rendement, na.rm = TRUE) - 1
+  )
+
+transactions_saison <- rendements %>%
+  group_by(ticker) %>%
+  summarise(nombre_transactions_saison = n())
+
+## on merge les stratégies pour comparer
+
+df_final = left_join(buy_hold_rendement,rendement_total,by = 'ticker')
+df_final = left_join(df_final,rendement_total_macd,by = 'ticker')
+df_final = left_join(df_final,rendement_total_obv, by = 'ticker')
+df_final = left_join(df_final,rendement_total_saison, by = 'ticker')
+
+df_final = df_final %>% 
+  select(ticker,rendement_hold,rendement_total,rend_total_macd,rend_total_obv,rendement_total_hiver) %>% 
+  rename(reference = rendement_hold,rsi = rendement_total, macd = rend_total_macd, obv = rend_total_obv, saison = rendement_total_hiver) %>%
+  mutate(reference = reference * 100,rsi = rsi*100, macd = macd*100, obv = obv*100, saison = saison*100)
+
+df_final = left_join(df_final,transactions_rsi, by = 'ticker')
+df_final = left_join(df_final,transactions_macd, by = 'ticker')
+df_final = left_join(df_final,transactions_obv, by = 'ticker')
+df_final = left_join(df_final,transactions_saison, by = 'ticker')
+
+
+
+sp_latest <- sp %>%
+  arrange(ticker, desc(date)) %>%         # Trier pour que la dernière date soit en premier
+  group_by(ticker) %>%
+  slice_head(n = 1) %>%                   # Garder la première ligne par ticker (donc la plus récente)
+  select(ticker, industry, country) %>%   # Garder les colonnes d'intérêt
+  ungroup()
+
+df_final = left_join(df_final,sp_latest, by = 'ticker')
+
+df_industry_pays <- df_final %>%
+  group_by(industry, country) %>%
+  summarise(
+    reference_mean = mean(reference, na.rm = TRUE),
+    rsi_mean = mean(rsi, na.rm = TRUE),
+    macd_mean = mean(macd, na.rm = TRUE),
+    obv_mean = mean(obv, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+
+## test de normalité des rendements et dickey-fuller 
+
+library(tseries)
+
+## PTON (On rejète la normalité)
+
+pton_data <- subset(sp, ticker == "PTON")
+serie_pton <- pton_data$close
+serie_pton_standard <- scale(serie_pton)
+
+ks.test(serie_pton_standard, "pnorm")
+adf.test(serie_pton_standard) ## pas stationnaire
+
+## LVMUY (On rejète la normalité)
+
+LVMUY_data <- subset(sp, ticker == "LVMUY")
+serie_LVMUY <- LVMUY_data$close
+serie_LVMUY_standard <- scale(serie_LVMUY)
+
+ks.test(serie_LVMUY_standard, "pnorm")
+adf.test(serie_LVMUY_standard) ## pas stationnaire
+
+## ABNB (On ne rejète pas la normalité)
+
+ABNB_data <- subset(sp, ticker == "ABNB")
+serie_ABNB <- ABNB_data$close
+serie_ABNB_standard <- scale(serie_ABNB)
+
+ks.test(serie_ABNB_standard, "pnorm")
+adf.test(serie_ABNB_standard) ## pas stationnaire
+
+## LUBSFY (On rejète la normalité)
+
+UBSFY_data <- subset(sp, ticker == "UBSFY")
+serie_UBSFY <- UBSFY_data$close
+serie_UBSFY_standard <- scale(serie_UBSFY)
+
+ks.test(serie_UBSFY_standard, "pnorm")
+adf.test(serie_UBSFY_standard) ## pas stationnaire
+
+## ZI (On rejète la normalité)
+
+ZI_data <- subset(sp, ticker == "ZI")
+serie_ZI <- ZI_data$close
+serie_ZI_standard <- scale(serie_ZI)
+
+ks.test(serie_ZI_standard, "pnorm")
+adf.test(serie_ZI_standard) ## pas stationnaire
+
+## TM (On rejète la normalité)
+
+TM_data <- subset(sp, ticker == "TM")
+serie_TM <- TM_data$close
+serie_TM_standard <- scale(serie_TM)
+
+ks.test(serie_TM_standard, "pnorm")
+adf.test(serie_TM_standard) ## pas stationnaire
+
+## MCD (On rejète la normalité)
+
+MCD_data <- subset(sp, ticker == "MCD")
+serie_MCD <- MCD_data$close
+serie_MCD_standard <- scale(serie_MCD)
+
+ks.test(serie_MCD_standard, "pnorm")
+adf.test(serie_MCD_standard) ## pas stationnaire
+
+## HD (On rejète la normalité)
+
+HD_data <- subset(sp, ticker == "HD")
+serie_HD <- HD_data$close
+serie_HD_standard <- scale(serie_HD)
+
+ks.test(serie_HD_standard, "pnorm")
+adf.test(serie_HD_standard) ## pas stationnaire
+
+## UBER (On rejète la normalité)
+
+UBER_data <- subset(sp, ticker == "UBER")
+serie_UBER <- UBER_data$close
+serie_UBER_standard <- scale(serie_UBER)
+
+ks.test(serie_UBER_standard, "pnorm")
+adf.test(serie_UBER_standard) ## pas stationnaire
+
+## COIN (On rejète la normalité)
+
+COIN_data <- subset(sp, ticker == "COIN")
+serie_COIN <- COIN_data$close
+serie_COIN_standard <- scale(serie_COIN)
+
+ks.test(serie_COIN_standard, "pnorm")
+adf.test(serie_COIN_standard) ## pas stationnaire
+
+## FDX (On rejète la normalité)
+
+FDX_data <- subset(sp, ticker == "FDX")
+serie_FDX <- FDX_data$close
+serie_FDX_standard <- scale(serie_FDX)
+
+ks.test(serie_FDX_standard, "pnorm")
+adf.test(serie_FDX_standard) ## pas stationnaire
+
+## FL (On rejète la normalité)
+
+FL_data <- subset(sp, ticker == "FL")
+serie_FL <- FL_data$close
+serie_FL_standard <- scale(serie_FL)
+
+ks.test(serie_FL_standard, "pnorm")
+adf.test(serie_FL_standard) ## pas stationnaire
+
+## SPOT (On rejète la normalité)
+
+SPOT_data <- subset(sp, ticker == "SPOT")
+serie_SPOT <- SPOT_data$close
+serie_SPOT_standard <- scale(serie_SPOT)
+
+ks.test(serie_SPOT_standard, "pnorm")
+adf.test(serie_SPOT_standard) ## pas stationnaire
+
+## ZM (On rejète la normalité)
+
+ZM_data <- subset(sp, ticker == "ZM")
+serie_ZM <- ZM_data$close
+serie_ZM_standard <- scale(serie_ZM)
+
+ks.test(serie_ZM_standard, "pnorm")
+adf.test(serie_ZM_standard) ## pas stationnaire
+
+## RBLX (On rejète la normalité)
+
+RBLX_data <- subset(sp, ticker == "RBLX")
+serie_RBLX <- RBLX_data$close
+serie_RBLX_standard <- scale(serie_RBLX)
+
+ks.test(serie_RBLX_standard, "pnorm")
+adf.test(serie_RBLX_standard) ## pas stationnaire
+
+## DAL (On rejète la normalité)
+
+DAL_data <- subset(sp, ticker == "DAL")
+serie_DAL <- DAL_data$close
+serie_DAL_standard <- scale(serie_DAL)
+
+ks.test(serie_DAL_standard, "pnorm")
+adf.test(serie_DAL_standard) ## pas stationnaire
+
+## PINS (On rejète la normalité)
+
+PINS_data <- subset(sp, ticker == "PINS")
+serie_PINS <- PINS_data$close
+serie_PINS_standard <- scale(serie_PINS)
+
+ks.test(serie_PINS_standard, "pnorm")
+adf.test(serie_PINS_standard) ## pas stationnaire
+
+## BAMXF (On rejète la normalité)
+
+BAMXF_data <- subset(sp, ticker == "BAMXF")
+serie_BAMXF <- BAMXF_data$close
+serie_BAMXF_standard <- scale(serie_BAMXF)
+
+ks.test(serie_BAMXF_standard, "pnorm")
+adf.test(serie_BAMXF_standard) ## pas stationnaire
+
+## POAHY (On rejète la normalité)
+
+POAHY_data <- subset(sp, ticker == "POAHY")
+serie_POAHY <- POAHY_data$close
+serie_POAHY_standard <- scale(serie_POAHY)
+
+ks.test(serie_POAHY_standard, "pnorm")
+adf.test(serie_POAHY_standard) ## pas stationnaire
