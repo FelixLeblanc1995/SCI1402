@@ -1,4 +1,4 @@
-# SCI1402
+## SCI1402
 
 # Description
 Dans ce projet, nous utilisons des données journalières provenant de plusieurs entreprises cotées sur différentes places boursières à travers le monde, dans le but d’évaluer la capacité des indicateurs techniques à générer des profits excédentaires.
