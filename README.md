@@ -15,4 +15,5 @@ L’étude portera sur l’évaluation de plusieurs stratégies de trading fond�
 Lien URL : https://www.kaggle.com/datasets/nelgiriyewithana/world-stock-prices-daily-updating
 
 ## Résultats
-Les résultats préliminaires suggèrent qu’il ne serait pas possible de générer un rendement excédentaire à l’aide de stratégies fondées sur les prix passés, comparativement à la stratégie de référence. Il serait pertinent d’approfondir l’analyse en évaluant la performance de ces stratégies par industrie et par pays — une démarche qui sera entreprise dans le cadre du projet final.
+Les résultats démontrent qu’il ne serait pas possible de réaliser un rendement excédentaire en utilisant des stratégies se basant sur les prix passés, et ce par rapport à la stratégie de référence. Ceci est vrai aussi lorsqu'on étend l'analyse aux industries et aux pays. 
+De plus, les test d'hypothèses permettent de conclure que toutes les séries de prix sont stationnaires, ce qui veut dire que le lag de la valeur ne contient alors pas d’information utile pour prédire le changement dans la variable analysée et donc qu’il est impossible de se baser sur les prix pour prédire les prix futurs, ce qui suit la logique des tests de performance.
